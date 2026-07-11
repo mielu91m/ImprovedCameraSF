@@ -1,0 +1,25 @@
+--- /tmp/orig2_pseudofp.cpp	2026-07-11 11:44:42.520484938 +0000
++++ new2/source/starfield/PseudoFP.cpp	2026-07-11 11:44:36.424485077 +0000
+@@ -561,6 +561,22 @@
+             ((void(*)(void*, float))g_origFPSUpdate)(a_this, a_deltaTime);
+         }
+         if (g_PseudoFPPActive && g_SAFAnimationPlaying) {
++            // DetourSetCameraState's block never fires for whatever puts the
++            // engine into real FPP during SAF (0 "BLOCKED SetCameraState"
++            // log entries despite CAM_STATE repeatedly showing FP=1) - SAF
++            // is switching camera state through some other engine path our
++            // SetCameraState hook doesn't see. Rather than keep chasing the
++            // exact function, stomp on it here: this runs every physics
++            // substep (much more often than the once-per-frame polling
++            // task's reactive ForceThirdPerson), so even if SAF re-forces
++            // FPP every single tick, we force it back before the next
++            // render just as often - turning what would otherwise be a
++            // fast fight (visually reading as a stuck/detached camera)
++            // into a correction the player can no longer perceive.
++            auto* camera = RE::PlayerCamera::GetSingleton();
++            if (camera && camera->IsInFirstPerson() && !IsInShipCameraState(camera)) {
++                camera->ForceThirdPerson();
++            }
+             ForceCameraToHead();
+         }
+     }

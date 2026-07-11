@@ -1,0 +1,74 @@
+--- /tmp/orig2_events.cpp	2026-07-11 11:44:42.516484938 +0000
++++ new2/source/starfield/EventsStarfield.cpp	2026-07-11 12:58:53.074929812 +0000
+@@ -488,7 +488,24 @@
+                 // --- Determine state ---
+                 const bool isTPP = camera->IsInThirdPerson();
+                 const bool isIronSightsNow = camera->QCameraEquals(RE::CameraState::kIronSights);
+-                const bool isShip = IsInShipCameraState(camera);
++                // Ship = either the engine's own Flight/Ship* camera states
++                // (only entered once actually flying/undocked), OR the
++                // player is sitting in the ship's pilot seat furniture -
++                // which happens FIRST, before takeoff. Sitting down is a
++                // furniture interaction like any other chair, so it must be
++                // checked separately from kFurniture: only THIS specific
++                // seat should count as "ship", not furniture in general.
++                //
++                // NOTE: an earlier attempt also treated camera idx==6
++                // (kUnk06, unlabeled in the SDK) as a ship signal, on the
++                // observation that it co-occurred with ship seating in two
++                // logs. That was wrong - it turned out to be a generic
++                // transition state that also fires for ordinary furniture
++                // sit/stand, which incorrectly kicked pseudo out to TPP for
++                // any chair, not just the ship. Removed; IsPlayerInShipPilotSeat
++                // (FormID-based, see HeadTracking.cpp) is now the sole signal
++                // for "sitting, not yet flying".
++                const bool isShip = IsInShipCameraState(camera) || (player && IsPlayerInShipPilotSeat(player));
+                 const bool isVehicle = IsInVehicleCameraState(camera);
+                 const bool isFPP = camera->IsInFirstPerson();
+                 const bool isFurniture = camera->QCameraEquals(RE::CameraState::kFurniture);
+@@ -521,11 +538,11 @@
+                     // transitions (Free*, furniture, etc.) must NOT disable
+                     // it — otherwise SAF animation startup briefly changes
+                     // state before reporting the animation, killing pseudo.
+-                    // The only exception is aiming (ADS), which temporarily
+-                    // switches to the real FPP camera while the trigger is
+-                    // held. When the user releases the trigger, pseudo
+-                    // resumes via ForceThirdPerson in the ADS handler below.
+-                    shouldPseudo = !isAimingNow;
++                    // The only exceptions are aiming (ADS) and piloting a
++                    // ship - both temporarily switch to a real engine
++                    // camera. When the user releases the trigger / exits
++                    // the ship, pseudo resumes automatically.
++                    shouldPseudo = !isAimingNow && !isShip;
+                     // Force FPP back to TPP - including during SAF. This
+                     // used to skip while safPlaying was true (to avoid
+                     // fighting a brief FPP flash right at SAF startup), but
+@@ -539,8 +556,8 @@
+                     // "the pseudo camera leaves the head and lets you
+                     // switch between the game's own cameras". Pseudo must
+                     // mean pseudo, full stop, any time it's not a genuine
+-                    // aim.
+-                    if (isFPP && !g_WasAiming && !isAimingNow) {
++                    // aim or ship flight.
++                    if (isFPP && !g_WasAiming && !isAimingNow && !isShip) {
+                         camera->ForceThirdPerson();
+                     }
+                 }
+@@ -594,7 +611,7 @@
+                     // so skip the delay and disable immediately.
+                     static int g_DisableDelayFrames = 0;
+                     constexpr int kDisableDelayMax = 15;
+-                    if (g_PseudoUserEnabled && g_PseudoFPPActive && !isAimingNow && g_DisableDelayFrames < kDisableDelayMax) {
++                    if (g_PseudoUserEnabled && g_PseudoFPPActive && !isAimingNow && !isShip && g_DisableDelayFrames < kDisableDelayMax) {
+                         g_DisableDelayFrames++;
+                         LogFormatted("PseudoFP: disable deferred %d/%d", g_DisableDelayFrames, kDisableDelayMax);
+                     } else {
+@@ -602,7 +619,7 @@
+                         if (g_PseudoFPPActive) {
+                             g_PseudoFPPActive = false;
+                             ClearPseudoCameraPointers();
+-                            LogFormatted("PseudoFP: disabled (non-TPP without SAF)");
++                            LogFormatted(isShip ? "PseudoFP: disabled (entered ship)" : "PseudoFP: disabled (non-TPP without SAF)");
+                         }
+                         if (!isBodyState) {
+                             // Skip TPP-specific logic below

@@ -1,0 +1,72 @@
+--- /tmp/orig2_headtracking.cpp	2026-07-11 12:04:31.553015275 +0000
++++ new2/source/starfield/HeadTracking.cpp	2026-07-11 12:59:10.702929372 +0000
+@@ -495,6 +495,24 @@
+             worldPos.x += fwd.x * fwdOff + right.x * sideOff + up.x * upOff;
+             worldPos.y += fwd.y * fwdOff + right.y * sideOff + up.y * upOff;
+             worldPos.z += fwd.z * fwdOff + right.z * sideOff + up.z * upOff;
++
++            // TEMPORARY DIAGNOSTIC - REMOVE AFTER TESTING.
++            // Flip to true, rebuild, test one SAF animation, then flip back
++            // to false (or delete this block) before normal use.
++            // If the on-screen camera visibly jumps ~3m straight up the
++            // instant SAF starts and stays there for the whole animation,
++            // we ARE editing the camera object that's actually rendered -
++            // meaning the "pulls back like TPP" look comes from somewhere
++            // else, not from patching the wrong node. If the camera does
++            // NOT visibly move at all, the rendered camera is a different
++            // NiCamera object than the one cameraRoot resolves to here.
++            constexpr bool kDiagTestSAFCameraOffset = false;
++            if (kDiagTestSAFCameraOffset) {
++                worldPos.z += 3.0f;
++                LogFormatted("DIAG_TEST: applied +3.0 Z offset, worldPos=(%.3f,%.3f,%.3f)",
++                    worldPos.x, worldPos.y, worldPos.z);
++            }
++
+             return worldPos;
+         } else if (cr) {
+             const float camYaw = std::atan2(cr->world.rotate.entry[1][0], cr->world.rotate.entry[0][0]);
+@@ -758,11 +776,43 @@
+         auto furnitureRef = furnitureHandle.get();
+         if (!furnitureRef) return false;
+ 
++        auto* baseObj = furnitureRef->GetBaseObject().get();
++        if (!baseObj) return false;
++
++        // Confirmed via SHIP_SEAT_CHECK_FAIL log: the EditorID-based keyword
++        // lookup below ("ShipPilotSeat") always resolves to null in the
++        // shipped game (SHIP_SEAT_KEYWORD_LOOKUP: resolved=NO) - EditorID
++        // strings simply aren't indexed at runtime in a retail build.
++        // Confirmed FormID of the base game's universal pilot seat furniture
++        // record (from Starfield.esm, load order 00): 0x00184717. This is
++        // now the primary, verified detection.
++        constexpr std::uint32_t kKnownShipPilotSeatFormID = 0x00184717;
++        if (baseObj->GetFormID() == kKnownShipPilotSeatFormID) {
++            return true;
++        }
++
++        // Kept as a secondary path in case a different ship/DLC uses a
++        // differently-FormID'd seat that happens to share this keyword, or
++        // in case EditorID data becomes available in some environments.
+         static RE::BGSKeyword* shipPilotSeatKeyword = nullptr;
+         if (!shipPilotSeatKeyword) {
+             shipPilotSeatKeyword = RE::TESForm::LookupByEditorID<RE::BGSKeyword>(RE::BSFixedString("ShipPilotSeat"));
+         }
+-        return shipPilotSeatKeyword && furnitureRef->HasKeyword(shipPilotSeatKeyword);
++        if (shipPilotSeatKeyword && furnitureRef->HasKeyword(shipPilotSeatKeyword)) {
++            return true;
++        }
++
++        // DIAGNOSTIC: log any OTHER furniture's FormID once per second while
++        // occupied but not recognized as the pilot seat, so additional ship
++        // variants can be identified and added to the known list above.
++        static int logThrottle = 0;
++        logThrottle++;
++        if ((logThrottle % 60) == 0) {
++            LogFormatted("SHIP_SEAT_CHECK_MISS: furnitureFormID=%08X baseObjFormID=%08X (not the known pilot seat)",
++                furnitureRef->GetFormID(), baseObj->GetFormID());
++        }
++
++        return false;
+     }
+ 
+     bool IsInShipCameraState(RE::PlayerCamera* camera)

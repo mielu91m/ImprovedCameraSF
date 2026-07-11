@@ -1,0 +1,143 @@
+--- /tmp/orig_hooks.cpp	2026-07-09 18:48:04.034206863 +0000
++++ new/source/starfield/Hooks.cpp	2026-07-09 19:08:47.268364113 +0000
+@@ -40,6 +40,8 @@
+     static RE::NiPoint3 g_HeadAnchorLocalOffset = {};
+     static RE::NiPoint3 g_LastValidHeadAnchorWorld = {};
+     static bool g_HasLastValidHeadAnchorWorld = false;
++    static RE::NiPoint3 g_LastRawUltraRigidAnchor = {};
++    static bool g_HasLastRawUltraRigidAnchor = false;
+     static uint32_t g_HeadAnchorMissCount = 0;
+     static RE::NiPoint3 g_SAFPinnedCameraLocalOffset = {};
+     static bool g_HasSAFPinnedCameraLocalOffset = false;
+@@ -935,6 +937,7 @@
+ 
+         if (!g_SAFAnimationPlaying) {
+             g_HasSAFPinnedCameraLocalOffset = false;
++            g_HasLastRawUltraRigidAnchor = false;
+         }
+ 
+         bool usingFallback = false;
+@@ -953,32 +956,73 @@
+                 // reads headMesh->worldBound.center, which the engine's bounds/culling
+                 // pass can momentarily report wrong for exactly one frame during SAF
+                 // (e.g. mid-frame bounds refresh while the pose is held). Unlike the
+-                // normal (non-ultra-rigid) path, this branch returns immediately with
+-                // no plausibility check at all, so a bad single-frame reading here
+-                // goes straight onto the rendered camera - this is what produces the
+-                // one-frame "jump away and snap back" that reads as a movable ghost
+-                // when it repeats every ~15-30 frames. Reject jumps from the last
+-                // accepted anchor that are larger than plausible per-frame head
+-                // motion during a held SAF pose, and reuse the last good value
+-                // instead. Deliberately compares against our own last output, not
+-                // player->GetPosition() (IsPlausibleHeadAnchor's reference point),
+-                // because the actor's logical position can itself drift/jitter
+-                // slightly during SAF independent of the actually-rendered pose.
++                // normal (non-ultra-rigid) path, this branch used to return immediately
++                // with no plausibility check at all, so a bad single-frame reading went
++                // straight onto the rendered camera.
++                //
++                // IMPORTANT: a simple "reject any big jump" rule is wrong - SAF poses
++                // legitimately relocate the head a large distance in one frame at the
++                // *start* of an animation (e.g. standing -> prone/seated), and rejecting
++                // that outright just freezes the camera at the pre-animation position
++                // forever (nothing ever updates g_LastValidHeadAnchorWorld again). That
++                // looks exactly like "the camera leaves the body the moment SAF starts",
++                // except permanently instead of for one frame - this was very likely a
++                // second, independent cause of that exact symptom.
++                //
++                // Fix: require two consecutive frames to agree before accepting a large
++                // jump. A bounds-read glitch is a single stray frame that will NOT repeat
++                // next frame; a real pose transition persists (next frame's raw reading
++                // stays close to this frame's).
++                //
++                // UPDATE based on real-world log evidence: a "confirm by next
++                // frame" rule is not enough. headMesh->worldBound.center can
++                // genuinely OSCILLATE between two distinct real values a
++                // fraction of a meter apart for the ENTIRE duration of a held
++                // SAF pose (observed: ~0.69m swing, each side persisting for
++                // many consecutive calls before flipping back - likely from
++                // hair/headgear/face sub-meshes toggling in and out of the
++                // aggregate bounds calculation). Since each side persists
++                // long enough to get "confirmed", the old accept/reject logic
++                // accepted BOTH sides as legitimate and snapped the camera
++                // back and forth every time it flipped - this is what read
++                // as the pseudo camera "pulling back like a normal TPP
++                // camera" during testing (confirmed by ENGINE_OVERWRITE
++                // logs showing the exact same ~0.69m swing reaching the
++                // rendered camera).
++                //
++                // Fix: smooth (exponential moving average) toward the raw
++                // reading instead of hard-switching to it. A repeating
++                // oscillation gets damped into a stable midpoint. A genuine
++                // one-time pose transition still converges quickly, since
++                // this function is called many times per rendered frame.
+                 const bool ignoreUltraRigidSanity = IsUltraRigidIgnoreSanityChecksEnabled();
+                 bool acceptUltraRigidAnchor = IsFinitePoint(directBoneAnchor);
+-                if (acceptUltraRigidAnchor && g_SAFAnimationPlaying && g_HasLastValidHeadAnchorWorld && !ignoreUltraRigidSanity) {
+-                    constexpr float kMaxSAFAnchorJumpPerFrame = 0.25f; // meters
+-                    const float jdx = directBoneAnchor.x - g_LastValidHeadAnchorWorld.x;
+-                    const float jdy = directBoneAnchor.y - g_LastValidHeadAnchorWorld.y;
+-                    const float jdz = directBoneAnchor.z - g_LastValidHeadAnchorWorld.z;
+-                    const float jumpDist = std::sqrt(jdx * jdx + jdy * jdy + jdz * jdz);
+-                    if (jumpDist > kMaxSAFAnchorJumpPerFrame) {
+-                        LogFormatted("ULTRA_RIGID_REJECT_JUMP: bad=(%.3f,%.3f,%.3f) lastGood=(%.3f,%.3f,%.3f) dist=%.3f",
+-                            directBoneAnchor.x, directBoneAnchor.y, directBoneAnchor.z,
+-                            g_LastValidHeadAnchorWorld.x, g_LastValidHeadAnchorWorld.y, g_LastValidHeadAnchorWorld.z,
+-                            jumpDist);
+-                        directBoneAnchor = g_LastValidHeadAnchorWorld;
++                if (acceptUltraRigidAnchor) {
++                    const RE::NiPoint3 rawThisFrame = directBoneAnchor;
++
++                    if (g_SAFAnimationPlaying && g_HasLastValidHeadAnchorWorld && !ignoreUltraRigidSanity) {
++                        constexpr float kSmoothingAlpha = 0.25f;  // 0=frozen, 1=no smoothing
++                        RE::NiPoint3 smoothed;
++                        smoothed.x = g_LastValidHeadAnchorWorld.x + (directBoneAnchor.x - g_LastValidHeadAnchorWorld.x) * kSmoothingAlpha;
++                        smoothed.y = g_LastValidHeadAnchorWorld.y + (directBoneAnchor.y - g_LastValidHeadAnchorWorld.y) * kSmoothingAlpha;
++                        smoothed.z = g_LastValidHeadAnchorWorld.z + (directBoneAnchor.z - g_LastValidHeadAnchorWorld.z) * kSmoothingAlpha;
++
++                        const float jdx = directBoneAnchor.x - g_LastValidHeadAnchorWorld.x;
++                        const float jdy = directBoneAnchor.y - g_LastValidHeadAnchorWorld.y;
++                        const float jdz = directBoneAnchor.z - g_LastValidHeadAnchorWorld.z;
++                        const float jumpDist = std::sqrt(jdx * jdx + jdy * jdy + jdz * jdz);
++                        if (jumpDist > 0.02f) {
++                            LogFormatted("ULTRA_RIGID_SMOOTH: raw=(%.3f,%.3f,%.3f) prev=(%.3f,%.3f,%.3f) smoothed=(%.3f,%.3f,%.3f) dist=%.3f",
++                                directBoneAnchor.x, directBoneAnchor.y, directBoneAnchor.z,
++                                g_LastValidHeadAnchorWorld.x, g_LastValidHeadAnchorWorld.y, g_LastValidHeadAnchorWorld.z,
++                                smoothed.x, smoothed.y, smoothed.z, jumpDist);
++                        }
++                        directBoneAnchor = smoothed;
+                     }
++
++                    // Keep the raw reading around for diagnostics.
++                    g_LastRawUltraRigidAnchor = rawThisFrame;
++                    g_HasLastRawUltraRigidAnchor = true;
+                 }
+ 
+                 if (acceptUltraRigidAnchor) {
+@@ -1675,6 +1719,8 @@
+         g_LastValidHeadAnchorWorld = {};
+         g_HasSAFPinnedCameraLocalOffset = false;
+         g_SAFPinnedCameraLocalOffset = {};
++        g_HasLastRawUltraRigidAnchor = false;
++        g_LastRawUltraRigidAnchor = {};
+     }
+ 
+     // For vehicle/ship states: fully reset camera nodes to player position
+@@ -1826,8 +1872,15 @@
+         }
+ 
+         auto* camera = RE::PlayerCamera::GetSingleton();
+-        // Skip during FPP (ADS) so the real first-person camera is left alone.
+-        if (camera && camera->IsInFirstPerson()) {
++        // Skip during real FPP (ADS) so the real first-person camera is left
++        // alone - but NEVER during SAF. If the engine (or a false read)
++        // reports IsInFirstPerson()==true while a SAF animation is playing,
++        // this used to hand full control to the real FPP camera immediately
++        // - which is indistinguishable from "the pseudo camera escaping to
++        // the normal camera the moment SAF starts". A SAF session must
++        // always keep the pseudo rig in control regardless of what the
++        // engine's own first-person flag says.
++        if (camera && camera->IsInFirstPerson() && !g_SAFAnimationPlaying) {
+             return;
+         }
+ 

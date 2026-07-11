@@ -9,37 +9,6 @@
 
 namespace Patch {
 
-    namespace {
-        static void VLog(const char* fmt, va_list args)
-        {
-            char* userProfile = nullptr;
-            size_t len = 0;
-            _dupenv_s(&userProfile, &len, "USERPROFILE");
-            std::string path = std::string(userProfile ? userProfile : "") + "\\Documents\\My Games\\Starfield\\SFSE\\ImprovedCameraSF_debug.log";
-            free(userProfile);
-            std::ofstream log(path, std::ios::app);
-            if (log) {
-                time_t t = time(nullptr);
-                struct tm tm;
-                localtime_s(&tm, &t);
-                char buf[64];
-                strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
-                log << "[StarfieldSF " << buf << "] ";
-                char msg[768];
-                vsprintf_s(msg, fmt, args);
-                log << msg << std::endl;
-            }
-        }
-
-        static void LogFormatted(const char* fmt, ...)
-        {
-            va_list args;
-            va_start(args, fmt);
-            VLog(fmt, args);
-            va_end(args);
-        }
-    }
-
     StarfieldSF::StarfieldSF() {}
 
     bool StarfieldSF::Load(Systems::Config* config)
